@@ -1,0 +1,96 @@
+x-app-build: &app-build
+  build: .
+  environment: &app-env
+    DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-payment}:${POSTGRES_PASSWORD:-payment}@postgres:5432/${POSTGRES_DB:-payment}
+    RABBITMQ_URL: amqp://${RABBITMQ_USER:-payment}:${RABBITMQ_PASSWORD:-payment}@rabbitmq:5672/
+    API_KEY: ${API_KEY:-dev-api-key}
+    OUTBOX_POLL_INTERVAL_SECONDS: ${OUTBOX_POLL_INTERVAL_SECONDS:-1}
+    OUTBOX_BATCH_SIZE: ${OUTBOX_BATCH_SIZE:-50}
+    WEBHOOK_TIMEOUT_SECONDS: ${WEBHOOK_TIMEOUT_SECONDS:-10}
+    WEBHOOK_ATTEMPTS: ${WEBHOOK_ATTEMPTS:-3}
+    PROCESSING_MIN_SECONDS: ${PROCESSING_MIN_SECONDS:-2}
+    PROCESSING_MAX_SECONDS: ${PROCESSING_MAX_SECONDS:-5}
+    PROCESSING_SUCCESS_RATE: ${PROCESSING_SUCCESS_RATE:-0.9}
+    UV_NO_SYNC: "1"
+  volumes: &app-volumes
+    - ./src:/app/src
+    - ./alembic:/app/alembic
+    - ./alembic.ini:/app/alembic.ini
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-payment}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-payment}
+      POSTGRES_DB: ${POSTGRES_DB:-payment}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-payment} -d ${POSTGRES_DB:-payment}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-payment}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-payment}
+    ports:
+      - "${RABBITMQ_PORT:-5672}:5672"
+      - "${RABBITMQ_MANAGEMENT_PORT:-15672}:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_port_connectivity"]
+      interval: 5s
+      timeout: 10s
+      retries: 12
+      start_period: 15s
+
+  api:
+    <<: *app-build
+    ports:
+      - "${API_PORT:-8000}:8000"
+    environment:
+      <<: *app-env
+      UVICORN_RELOAD: "1"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["uv", "run", "--no-dev", "python", "-m", "payment.entrypoint", "api"]
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  consumer:
+    <<: *app-build
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    command: ["uv", "run", "--no-dev", "python", "-m", "payment.entrypoint", "consumer"]
+
+  outbox:
+    <<: *app-build
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    command: ["uv", "run", "--no-dev", "python", "-m", "payment.entrypoint", "outbox"]
+
+volumes:
+  postgres_data:
