@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     processing_min_seconds: float = 2.0
     processing_max_seconds: float = 5.0
     processing_success_rate: float = 0.9
+    claim_lease_seconds: float = 30.0
 
 
 settings = Settings()

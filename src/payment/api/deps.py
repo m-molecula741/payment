@@ -1,13 +1,9 @@
 import secrets
 from typing import Annotated
 
-from fastapi import Depends, Header, HTTPException, status
-from sqlalchemy.ext.asyncio import AsyncSession
+from fastapi import Header, HTTPException, status
 
 from payment.config import settings
-from payment.db.session import get_session
-
-SessionDep = Annotated[AsyncSession, Depends(get_session)]
 
 
 def require_api_key(

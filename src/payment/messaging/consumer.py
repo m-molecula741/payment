@@ -7,18 +7,18 @@ from faststream import FastStream
 from faststream.exceptions import RejectMessage
 from faststream.rabbit.annotations import RabbitMessage
 
+from payment.config import settings
 from payment.messaging.broker import broker
-from payment.messaging.publish import publish_new
-from payment.messaging.retry import backoff_seconds
+from payment.messaging.publish import publish_later
 from payment.messaging.topology import (
     DLQ,
-    MAX_DELIVERY_ATTEMPTS,
     NEW_QUEUE,
     declare_topology,
     payments_exchange,
     payments_new_queue,
+    retry_delay_ms,
 )
-from payment.services.processing import process_payment
+from payment.services.processing import PaymentBusy, process_payment
 from payment.services.webhook import WebhookDeliveryError
 
 logger = logging.getLogger("payment.consumer")
@@ -34,6 +34,11 @@ def attempt_of(message: RabbitMessage) -> int:
         return 1
 
 
+def give_up(attempt: int, max_attempts: int | None = None) -> bool:
+    limit = settings.webhook_attempts if max_attempts is None else max_attempts
+    return attempt >= limit
+
+
 @broker.subscriber(payments_new_queue, payments_exchange)
 async def handle_new_payment(body: dict[str, Any], message: RabbitMessage) -> None:
     attempt = attempt_of(message)
@@ -45,15 +50,23 @@ async def handle_new_payment(body: dict[str, Any], message: RabbitMessage) -> No
 
     try:
         await process_payment(payment_id)
+    except PaymentBusy:
+        logger.info("payment %s is claimed, retry in 1s", payment_id)
+        await publish_later(body, retry_delay_ms(1), attempt)
     except WebhookDeliveryError:
-        logger.error("webhook for %s failed after retries, sent to dlq", payment_id)
-        raise RejectMessage() from None
+        await _retry_or_drop(body, attempt, payment_id)
     except Exception:
         logger.exception("payment %s failed on attempt %s", payment_id, attempt)
-        if attempt >= MAX_DELIVERY_ATTEMPTS:
-            raise RejectMessage() from None
-        await asyncio.sleep(backoff_seconds(attempt))
-        await publish_new(body, attempt=attempt + 1)
+        await _retry_or_drop(body, attempt, payment_id)
+
+
+async def _retry_or_drop(body: dict[str, Any], attempt: int, payment_id: uuid.UUID) -> None:
+    if give_up(attempt):
+        logger.error("payment %s dropped after attempt %s", payment_id, attempt)
+        raise RejectMessage()
+    delay_ms = retry_delay_ms(attempt)
+    logger.info("payment %s scheduled in %sms, next attempt %s", payment_id, delay_ms, attempt + 1)
+    await publish_later(body, delay_ms, attempt + 1)
 
 
 @app.after_startup

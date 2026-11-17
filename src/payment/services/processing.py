@@ -2,15 +2,18 @@ import asyncio
 import logging
 import random
 import uuid
-from datetime import UTC, datetime
 
 from payment.config import settings
-from payment.db.models.payment import Payment
-from payment.db.session import session_factory
+from payment.db.repositories.payments import PaymentRepository
+from payment.domain.claim import Step
 from payment.domain.enums import PaymentStatus
-from payment.services.webhook import deliver_webhook
+from payment.services.webhook import WebhookDeliveryError, deliver_webhook
 
 logger = logging.getLogger("payment.processing")
+
+
+class PaymentBusy(Exception):
+    pass
 
 
 def decide_status(roll: float, success_rate: float = 0.9) -> PaymentStatus:
@@ -19,48 +22,37 @@ def decide_status(roll: float, success_rate: float = 0.9) -> PaymentStatus:
     return PaymentStatus.FAILED
 
 
-def webhook_body(payment: Payment) -> dict[str, str]:
-    return {
-        "payment_id": str(payment.id),
-        "status": payment.status.value,
-        "amount": str(payment.amount),
-        "currency": payment.currency.value,
-    }
-
-
 async def process_payment(payment_id: uuid.UUID) -> None:
-    """Эмулирует шлюз, пишет статус и вызывает webhook."""
-    async with session_factory() as session:
-        payment = await session.get(Payment, payment_id)
-        if payment is None:
-            logger.warning("payment %s not found", payment_id)
-            return
-        pending = payment.status == PaymentStatus.PENDING
-
-    if pending:
+    """Захватывает платёж, вне транзакции зовёт шлюз и один раз шлёт webhook."""
+    repo = PaymentRepository()
+    action = await repo.begin_processing(payment_id)
+    if action.step is Step.MISSING:
+        logger.warning("payment %s not found", payment_id)
+        return
+    if action.step is Step.DONE:
+        return
+    if action.step is Step.BUSY:
+        raise PaymentBusy
+    if action.step is Step.CHARGE:
         await asyncio.sleep(
             random.uniform(settings.processing_min_seconds, settings.processing_max_seconds)
         )
         outcome = decide_status(random.random(), settings.processing_success_rate)
-        async with session_factory() as session:
-            payment = await session.get(Payment, payment_id, with_for_update=True)
-            if payment is None:
-                logger.warning("payment %s not found", payment_id)
-                return
-            if payment.status == PaymentStatus.PENDING:
-                payment.status = outcome
-                payment.processed_at = datetime.now(UTC)
-                await session.commit()
-            body = webhook_body(payment)
-            url = payment.webhook_url
-        logger.info("payment %s finished with %s", payment_id, body["status"])
-    else:
-        async with session_factory() as session:
-            payment = await session.get(Payment, payment_id)
-            if payment is None:
-                return
-            body = webhook_body(payment)
-            url = payment.webhook_url
-        logger.info("payment %s already %s, retrying webhook", payment_id, body["status"])
+        action = await repo.finish_gateway(payment_id, outcome)
+        if action.step is Step.MISSING:
+            logger.warning("payment %s not found", payment_id)
+            return
+        if action.step is Step.DONE:
+            return
+        if action.step is Step.BUSY:
+            raise PaymentBusy
+        logger.info("payment %s finished with %s", payment_id, outcome.value)
 
-    await deliver_webhook(url, body)
+    if action.url is None or action.body is None:
+        return
+    try:
+        await deliver_webhook(action.url, action.body)
+    except WebhookDeliveryError:
+        await repo.release_webhook(payment_id)
+        raise
+    await repo.mark_webhook_delivered(payment_id)

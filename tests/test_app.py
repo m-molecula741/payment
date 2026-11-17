@@ -2,7 +2,7 @@ from fastapi.testclient import TestClient
 
 from payment.db.base import Base
 from payment.main import app
-from payment.messaging.topology import DLQ, NEW_QUEUE
+from payment.messaging.topology import DLQ, NEW_QUEUE, retry_queues
 
 
 def test_health() -> None:
@@ -33,3 +33,4 @@ def test_tables_and_queues_match_the_spec() -> None:
     assert "outbox" in Base.metadata.tables
     assert NEW_QUEUE == "payments.new"
     assert DLQ == "payments.dlq"
+    assert set(retry_queues) == {1000, 2000}

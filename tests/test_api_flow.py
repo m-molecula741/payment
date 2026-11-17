@@ -40,6 +40,13 @@ def test_create_is_idempotent_and_readable() -> None:
         assert again.json()["payment_id"] == body["payment_id"]
         assert body["status"] == "pending"
 
+        conflict = client.post(
+            f"{API}/api/v1/payments",
+            json={**payload, "amount": "1.00"},
+            headers=headers,
+        )
+        assert conflict.status_code == 409, conflict.text
+
         missing = client.get(
             f"{API}/api/v1/payments/{uuid.uuid4()}",
             headers={"X-API-Key": API_KEY},

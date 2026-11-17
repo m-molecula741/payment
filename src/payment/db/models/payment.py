@@ -47,3 +47,6 @@ class Payment(Base):
         server_default=func.now(),
     )
     processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    webhook_claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    webhook_delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
